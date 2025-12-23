@@ -133,6 +133,8 @@ This system models long-term financial planning as a **stochastic process under 
 
 ---
 
+# Mathematical Foundation
+
 ### 1. Stochastic Asset Returns
 
 Each asset *i* is modeled as a random variable rather than a fixed return:
