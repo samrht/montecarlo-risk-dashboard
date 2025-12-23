@@ -1,0 +1,162 @@
+@import "tailwindcss";
+
+/* ---------- base ---------- */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: rgb(9, 9, 11);
+  color: rgb(244, 244, 245);
+}
+
+/* ---------- full-page space gradient ---------- */
+.space-bg {
+  background-color: rgb(9, 9, 11);
+  background-image: radial-gradient(
+      1400px circle at 15% 10%,
+      rgba(99, 102, 241, 0.22),
+      transparent 60%
+    ),
+    radial-gradient(
+      1200px circle at 85% 20%,
+      rgba(34, 211, 238, 0.18),
+      transparent 60%
+    ),
+    radial-gradient(
+      1000px circle at 50% 90%,
+      rgba(168, 85, 247, 0.16),
+      transparent 65%
+    );
+}
+
+/* ---------- animated blobs ---------- */
+@keyframes blob1 {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    transform: translate(28px, -20px) scale(1.05);
+  }
+}
+@keyframes blob2 {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    transform: translate(-24px, 24px) scale(1.04);
+  }
+}
+@keyframes blob3 {
+  from {
+    transform: translate(0, 0) scale(1);
+  }
+  to {
+    transform: translate(18px, 14px) scale(1.06);
+  }
+}
+
+.blob {
+  will-change: transform;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+
+.blob-1 {
+  animation: blob1 18s infinite alternate;
+}
+.blob-2 {
+  animation: blob2 22s infinite alternate;
+}
+.blob-3 {
+  animation: blob3 26s infinite alternate;
+}
+
+/* ---------- subtle starfield ---------- */
+@keyframes starsSlow {
+  from {
+    transform: translate(0, 0);
+  }
+  to {
+    transform: translate(-120px, 80px);
+  }
+}
+@keyframes starsSlower {
+  from {
+    transform: translate(0, 0);
+  }
+  to {
+    transform: translate(160px, -120px);
+  }
+}
+
+.stars {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  opacity: 0.15;
+}
+
+.stars-1 {
+  background-image: radial-gradient(
+      1px 1px at 20px 30px,
+      rgba(255, 255, 255, 0.6) 50%,
+      transparent 52%
+    ),
+    radial-gradient(
+      1px 1px at 140px 90px,
+      rgba(255, 255, 255, 0.4) 50%,
+      transparent 52%
+    ),
+    radial-gradient(
+      1px 1px at 60px 160px,
+      rgba(255, 255, 255, 0.35) 50%,
+      transparent 52%
+    );
+  background-size: 220px 220px;
+  animation: starsSlow 90s linear infinite;
+}
+
+.stars-2 {
+  opacity: 0.1;
+  background-image: radial-gradient(
+      1.5px 1.5px at 100px 60px,
+      rgba(255, 255, 255, 0.35) 50%,
+      transparent 52%
+    ),
+    radial-gradient(
+      1.5px 1.5px at 200px 160px,
+      rgba(255, 255, 255, 0.25) 50%,
+      transparent 52%
+    );
+  background-size: 320px 320px;
+  animation: starsSlower 140s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .blob,
+  .stars-1,
+  .stars-2 {
+    animation: none !important;
+  }
+}
+
+/* ---------- fade-in ---------- */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.35s ease-out both;
+}
