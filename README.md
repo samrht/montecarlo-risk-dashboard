@@ -502,5 +502,4 @@ This system demonstrates:
 It bridges **quantitative finance, software engineering, and decision science** in a single, cohesive application.
 
 
-For each asset *i*:
 
