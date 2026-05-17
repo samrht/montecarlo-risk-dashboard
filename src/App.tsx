@@ -151,7 +151,7 @@ export default function App() {
 
       <div className="grid h-screen grid-cols-12">
         <aside className="col-span-12 border-b border-white/10 md:col-span-3 md:border-b-0 md:border-r xl:col-span-2">
-          <Sidebar active={nav} onNav={setNav} />
+          <Sidebar active={nav} onNav={setNav} hasResults={baseRes !== null} />
         </aside>
 
         <div className="col-span-12 flex h-full flex-col md:col-span-9 xl:col-span-10">

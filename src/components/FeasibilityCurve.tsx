@@ -25,6 +25,52 @@ function successProb(terminal: number[], target: number) {
 
 const COLORS = ["#22d3ee", "#fb7185", "#fbbf24", "#a78bfa"];
 
+type ChartRow = { target: number; base: number; [key: string]: number };
+
+type TooltipEntry = {
+  name: string;
+  value: number;
+  color: string;
+};
+
+function FeasibilityTooltip({
+  active,
+  payload,
+  stressLabels,
+}: {
+  active?: boolean;
+  payload?: { payload?: ChartRow }[];
+  stressLabels: string[];
+}) {
+  if (!active || !payload || payload.length === 0) return null;
+  const row = payload[0].payload;
+  if (!row) return null;
+
+  const entries: TooltipEntry[] = [
+    { name: "Base", value: row.base, color: COLORS[0] },
+    ...stressLabels.map((label, idx) => ({
+      name: label,
+      value: row[`stress_${idx}`] ?? 0,
+      color: COLORS[(idx + 1) % COLORS.length],
+    })),
+  ];
+
+  return (
+    <div className="rounded-xl border border-white/10 bg-zinc-950/90 px-3 py-2 shadow-xl backdrop-blur-md">
+      <div className="mb-1 text-xs font-semibold text-zinc-200">
+        Target {inr(row.target)}
+      </div>
+      {entries.map((e) => (
+        <div key={e.name} className="flex items-center gap-2 text-xs">
+          <span style={{ color: e.color }}>●</span>
+          <span className="text-zinc-400 w-28 truncate">{e.name}</span>
+          <span className="font-semibold text-zinc-100">{pct(e.value)}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function FeasibilityCurve({
   base,
   stress,
@@ -41,17 +87,19 @@ export default function FeasibilityCurve({
     return base.goalFuture * mul;
   });
 
-  const baseData = targets.map((t) => ({
-    target: t,
-    p: successProb(base.terminal, t),
-  }));
-
-  const stressData = stress.map((s) =>
-    targets.map((t) => ({
+  // Build a single unified dataset with one row per target point,
+  // all series as keys — this lets Recharts share the x-axis and
+  // the tooltip receives the full row (all series values at once).
+  const chartData: ChartRow[] = targets.map((t) => {
+    const row: ChartRow = {
       target: t,
-      p: successProb(s.res.terminal, t),
-    }))
-  );
+      base: successProb(base.terminal, t),
+    };
+    stress.forEach((s, idx) => {
+      row[`stress_${idx}`] = successProb(s.res.terminal, t);
+    });
+    return row;
+  });
 
   return (
     <Card className="bg-white/5">
@@ -62,44 +110,36 @@ export default function FeasibilityCurve({
 
       <div className="h-72">
         <ResponsiveContainer width="100%" height="100%">
-          <LineChart>
+          <LineChart data={chartData}>
             <XAxis
               dataKey="target"
               type="number"
               domain={["dataMin", "dataMax"]}
               tickFormatter={(v: number) => `${Math.round(v / 1e5)}L`}
+              tick={{ fill: "#a1a1aa", fontSize: 11 }}
+              axisLine={{ stroke: "rgba(255,255,255,0.1)" }}
+              tickLine={false}
             />
             <YAxis
               domain={[0, 1]}
               tickFormatter={(v: number) => `${Math.round(v * 100)}%`}
+              tick={{ fill: "#a1a1aa", fontSize: 11 }}
+              axisLine={false}
+              tickLine={false}
             />
             <Tooltip
               cursor={{ stroke: "rgba(255,255,255,0.15)" }}
-              content={({ active, payload }) => {
-                if (!active || !payload || payload.length === 0) return null;
-                const row = payload[0].payload as {
-                  target: number;
-                  p: number;
-                };
-                return (
-                  <div className="rounded-xl border border-white/10 bg-zinc-950/90 px-3 py-2 shadow-xl backdrop-blur-md">
-                    <div className="text-xs font-semibold text-zinc-200">
-                      Target {inr(row.target)}
-                    </div>
-                    <div className="mt-1 text-sm text-zinc-100">
-                      P(success){" "}
-                      <span className="font-semibold">{pct(row.p)}</span>
-                    </div>
-                  </div>
-                );
-              }}
+              content={
+                <FeasibilityTooltip
+                  stressLabels={stress.map((s) => s.label)}
+                />
+              }
             />
 
             {/* Base curve */}
             <Line
-              data={baseData}
               type="monotone"
-              dataKey="p"
+              dataKey="base"
               stroke={COLORS[0]}
               strokeWidth={3}
               dot={false}
@@ -107,18 +147,17 @@ export default function FeasibilityCurve({
             />
 
             {/* Stress overlays */}
-            {stressData.map((d, idx) => (
+            {stress.map((s, idx) => (
               <Line
-                key={stress[idx].label}
-                data={d}
+                key={s.label}
                 type="monotone"
-                dataKey="p"
+                dataKey={`stress_${idx}`}
                 stroke={COLORS[(idx + 1) % COLORS.length]}
                 strokeWidth={2}
                 strokeDasharray="6 4"
                 dot={false}
                 opacity={0.85}
-                name={stress[idx].label}
+                name={s.label}
               />
             ))}
           </LineChart>
@@ -127,9 +166,9 @@ export default function FeasibilityCurve({
 
       <div className="mt-2 flex flex-wrap gap-3 text-xs">
         <span className="font-medium text-zinc-200">Legend:</span>
-        <span className="text-cyan-300">━ Base</span>
-        {stress.map((s) => (
-          <span key={s.label} className="text-zinc-300">
+        <span style={{ color: COLORS[0] }}>━ Base</span>
+        {stress.map((s, idx) => (
+          <span key={s.label} style={{ color: COLORS[(idx + 1) % COLORS.length] }}>
             ┄ {s.label}
           </span>
         ))}

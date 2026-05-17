@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Config, Results } from "../engine/types";
 import { runActions, type ActionResult } from "../engine/actionClient";
 import { Card, SectionTitle } from "./ui";
@@ -24,36 +24,38 @@ export default function ActionEngine({
   base: Results;
 }) {
   const [state, setState] = useState<AState>({ kind: "idle" });
-  const analysisCfg = useMemo<Config>(() => ({ ...cfg }), [cfg]);
+
+  // Use a serialized key so the effect only re-fires when cfg actually changes,
+  // not on every parent render (the old useMemo spread was a no-op for referential equality).
+  const cfgKey = JSON.stringify(cfg);
+  const prevKey = useRef<string>("");
 
   useEffect(() => {
-    let cancelled = false;
+    if (cfgKey === prevKey.current) return;
+    prevKey.current = cfgKey;
 
-    async function run() {
-      setState({ kind: "loading" });
-      try {
-        const data = await runActions(analysisCfg, [0.7, 0.8, 0.9], 2000, 500);
+    let cancelled = false;
+    setState({ kind: "loading" });
+
+    runActions(cfg, [0.7, 0.8, 0.9], 2000, 500)
+      .then((data) => {
         if (!cancelled) setState({ kind: "ready", data });
-      } catch (e) {
+      })
+      .catch((e: unknown) => {
         const msg = e instanceof Error ? e.message : "Unknown error";
         if (!cancelled) setState({ kind: "error", message: msg });
-      }
-    }
+      });
 
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [analysisCfg]);
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cfgKey]);
 
   if (state.kind === "loading" || state.kind === "idle") {
     return (
       <Card className="bg-white/5">
         <SectionTitle
           title="Actionable Recommendations"
-          subtitle={`Current success: ${pct(
-            base.pSuccess
-          )} — computing (worker)…`}
+          subtitle={`Current success: ${pct(base.pSuccess)} — computing (worker)…`}
         />
         <div className="mt-2 h-2 w-full rounded-full bg-white/10">
           <div className="h-2 w-1/3 animate-pulse rounded-full bg-indigo-500/60" />
@@ -103,16 +105,28 @@ export default function ActionEngine({
                   Increase income, raise caps, or extend horizon.
                 </div>
               </div>
-            ) : (
+            ) : item80.deltaSip !== null && item80.deltaSip > 0 ? (
+              // Need to increase SIP
               <div className="rounded-xl border border-white/10 bg-zinc-950/30 p-3">
                 <div className="text-zinc-300">
                   To reach <b>80% success</b>:
                 </div>
                 <div className="mt-1 text-base font-semibold text-emerald-300">
-                  Increase SIP by {inr(item80.deltaSip ?? 0)}/month
+                  Increase SIP by {inr(item80.deltaSip)}/month
                 </div>
                 <div className="mt-1 text-xs text-zinc-400">
                   ({inr(cfg.sipMonthly)} → {inr(item80.requiredSip)})
+                </div>
+              </div>
+            ) : (
+              // Already at or above 80%
+              <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-3">
+                <div className="text-sm font-semibold text-emerald-200">
+                  Your plan already exceeds 80% success.
+                </div>
+                <div className="mt-1 text-xs text-zinc-400">
+                  Current success: <b>{pct(base.pSuccess)}</b>. You're on
+                  track — consider raising your goal or shortening the horizon.
                 </div>
               </div>
             )}
@@ -134,7 +148,16 @@ export default function ActionEngine({
                         ? "Unreachable"
                         : inr(it.requiredSip)
                     }
-                    delta={it.deltaSip === null ? "" : `(+${inr(it.deltaSip)})`}
+                    delta={
+                      it.deltaSip === null
+                        ? ""
+                        : it.deltaSip > 0
+                        ? `(+${inr(it.deltaSip)})`
+                        : it.deltaSip === 0
+                        ? "(already met)"
+                        : `(${inr(it.deltaSip)})`
+                    }
+                    deltaPositive={it.deltaSip !== null && it.deltaSip <= 0}
                   />
                 ))}
               </div>
@@ -150,16 +173,20 @@ function Row({
   label,
   value,
   delta,
+  deltaPositive,
 }: {
   label: string;
   value: string;
   delta: string;
+  deltaPositive?: boolean;
 }) {
   return (
     <div className="flex items-center justify-between gap-3">
       <div className="text-zinc-400">{label}</div>
       <div className="text-zinc-200 font-medium">{value}</div>
-      <div className="text-zinc-400">{delta}</div>
+      <div className={deltaPositive ? "text-emerald-400" : "text-zinc-400"}>
+        {delta}
+      </div>
     </div>
   );
 }

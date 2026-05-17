@@ -67,26 +67,25 @@ export default function CorrMatrix({
               className="grid"
               style={{ gridTemplateColumns: `140px repeat(${n}, 1fr)` }}
             >
+              {/* Header row */}
               <div />
               {assetNames.map((nm, j) => (
                 <div
-                  key={j}
+                  key={`hdr-${j}`}
                   className="truncate px-2 py-1 text-xs text-zinc-400"
                 >
                   {nm}
                 </div>
               ))}
 
+              {/* Data rows — Fragment needs explicit key */}
               {assetNames.map((rowName, i) => (
-                <>
-                  <div
-                    key={`r-${i}`}
-                    className="truncate px-2 py-2 text-xs text-zinc-400"
-                  >
+                <div key={`row-${i}`} className="contents">
+                  <div className="truncate px-2 py-2 text-xs text-zinc-400">
                     {rowName}
                   </div>
                   {assetNames.map((_, j) => (
-                    <div key={`${i}-${j}`} className="px-1 py-1">
+                    <div key={`cell-${i}-${j}`} className="px-1 py-1">
                       <Input
                         disabled={i === j}
                         type="number"
@@ -96,7 +95,7 @@ export default function CorrMatrix({
                       />
                     </div>
                   ))}
-                </>
+                </div>
               ))}
             </div>
           </div>

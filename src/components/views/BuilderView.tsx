@@ -149,14 +149,25 @@ export default function BuilderView({
                 ))}
               </Select>
             </div>
-            <div>
-              <Label>df (only for t)</Label>
-              <Input
-                type="number"
-                value={cfg.df}
-                onChange={(e) => setCfg({ ...cfg, df: Number(e.target.value) })}
-              />
-            </div>
+
+            {/* Only show df when model is Student-t */}
+            {cfg.model === "t" ? (
+              <div>
+                <Label>Degrees of freedom (df)</Label>
+                <Input
+                  type="number"
+                  min={2}
+                  step={1}
+                  value={cfg.df}
+                  onChange={(e) =>
+                    setCfg({ ...cfg, df: Number(e.target.value) })
+                  }
+                />
+              </div>
+            ) : (
+              <div />
+            )}
+
             <div>
               <Label>Rebalancing</Label>
               <Select

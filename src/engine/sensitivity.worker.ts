@@ -1,10 +1,11 @@
 /// <reference lib="webworker" />
 
 /**
- * robustness.worker.ts
+ * sensitivity.worker.ts
  *
- * Runs full-physics Monte Carlo (Cholesky correlation, TER, rebalancing,
- * Student-t) for robustness assessment — consistent with compute.ts.
+ * Computes real sensitivity (tornado) data by re-running Monte Carlo
+ * at ±10% perturbations of each key input. Uses the same physics as
+ * the main simulation: Cholesky correlation, TER, rebalancing, t-dist.
  */
 
 import type { Config } from "./types";
@@ -17,26 +18,27 @@ import {
   randn,
 } from "./math";
 
-type RobustnessMsg = {
-  type: "robustness";
+export type TornadoRow = {
+  name: string;
+  deltaUp: number;   // change in pSuccess when param is +10%
+  deltaDown: number; // change in pSuccess when param is -10%
+  pUp: number;
+  pDown: number;
+  pBase: number;
+};
+
+type SensitivityMsg = {
+  type: "sensitivity";
   id: string;
   cfg: Config;
   capSims?: number;
 };
 
-type RobustnessResult = {
-  level: "Robust" | "Sensitive" | "Fragile";
-  color: "🟢" | "🟡" | "🔴";
-  drop: number;
-  base: number;
-  stressed: number[];
-};
-
-type RobustnessOut =
-  | { type: "robustness_done"; id: string; result: RobustnessResult }
+type SensitivityOut =
+  | { type: "sensitivity_done"; id: string; rows: TornadoRow[]; pBase: number }
   | { type: "error"; id: string; message: string };
 
-/* ---------- shared physics ---------- */
+/* ---------- physics ---------- */
 
 function identity(n: number): number[][] {
   return Array.from({ length: n }, (_, i) =>
@@ -60,8 +62,7 @@ function estimatePSuccess(cfg: Config): number {
     sipEff = Math.min(sipEff, cfg.contribCapMonthly);
   }
 
-  const goalFuture =
-    cfg.goalToday * Math.pow(1 + cfg.inflationAnnual, cfg.years);
+  const goalFuture = cfg.goalToday * Math.pow(1 + cfg.inflationAnnual, cfg.years);
   const feeM = Math.pow(1 - cfg.terAnnual, 1 / 12) - 1;
 
   const rebalanceEvery =
@@ -93,7 +94,8 @@ function estimatePSuccess(cfg: Config): number {
           cfg.assets[i].muAnnual,
           cfg.assets[i].sigmaAnnual
         );
-        holdings[i] *= 1 + muM + sigmaM * zc[i] * scale;
+        const r = muM + sigmaM * zc[i] * scale;
+        holdings[i] *= 1 + r;
       }
 
       if (rebalanceEvery && t % rebalanceEvery === 0) {
@@ -114,66 +116,102 @@ function estimatePSuccess(cfg: Config): number {
   return successCount / cfg.nSims;
 }
 
-function perturbConfig(
-  cfg: Config,
-  muShift: number,
-  sigmaMult: number,
-  corrBoost: number
-): Config {
-  const bumpedCorr =
-    cfg.corr === null
-      ? null
-      : cfg.corr.map((row, i) =>
-          row.map((v, j) => (i === j ? 1 : Math.min(0.95, v + corrBoost)))
-        );
+/* ---------- perturbations ---------- */
 
+function perturbMu(cfg: Config, factor: number): Config {
   return {
     ...cfg,
     assets: cfg.assets.map((a) => ({
       ...a,
-      muAnnual: a.muAnnual + muShift,
-      sigmaAnnual: a.sigmaAnnual * sigmaMult,
+      muAnnual: a.muAnnual * factor,
     })),
-    corr: bumpedCorr,
   };
 }
 
-/* ---------- worker handler ---------- */
+function perturbSigma(cfg: Config, factor: number): Config {
+  return {
+    ...cfg,
+    assets: cfg.assets.map((a) => ({
+      ...a,
+      sigmaAnnual: a.sigmaAnnual * factor,
+    })),
+  };
+}
 
-self.onmessage = (ev: MessageEvent<RobustnessMsg>) => {
+function perturbSip(cfg: Config, factor: number): Config {
+  return { ...cfg, sipMonthly: cfg.sipMonthly * factor };
+}
+
+function perturbInflation(cfg: Config, factor: number): Config {
+  return { ...cfg, inflationAnnual: cfg.inflationAnnual * factor };
+}
+
+/* ---------- worker message handler ---------- */
+
+self.onmessage = (ev: MessageEvent<SensitivityMsg>) => {
   const msg = ev.data;
-  if (msg.type !== "robustness") return;
+  if (msg.type !== "sensitivity") return;
 
   try {
-    const cap = msg.capSims ?? 2500;
+    const cap = msg.capSims ?? 3000;
     const cfg: Config = {
       ...msg.cfg,
-      nSims: Math.max(500, Math.min(msg.cfg.nSims, cap)),
+      nSims: Math.max(1000, Math.min(msg.cfg.nSims, cap)),
     };
 
-    const base = estimatePSuccess(cfg);
+    const pBase = estimatePSuccess(cfg);
 
-    const stressedCfgs = [
-      perturbConfig(cfg, -0.01, 1.1, 0.1),
-      perturbConfig(cfg, -0.02, 1.2, 0.2),
-      perturbConfig(cfg, -0.015, 1.25, 0.15),
+    const inputs: { name: string; up: Config; down: Config }[] = [
+      {
+        name: "Expected return (μ)",
+        up: perturbMu(cfg, 1.1),
+        down: perturbMu(cfg, 0.9),
+      },
+      {
+        name: "Volatility (σ)",
+        up: perturbSigma(cfg, 1.1),
+        down: perturbSigma(cfg, 0.9),
+      },
+      {
+        name: "SIP amount",
+        up: perturbSip(cfg, 1.1),
+        down: perturbSip(cfg, 0.9),
+      },
+      {
+        name: "Inflation rate",
+        up: perturbInflation(cfg, 1.1),
+        down: perturbInflation(cfg, 0.9),
+      },
     ];
 
-    const stressed = stressedCfgs.map(estimatePSuccess);
-    const drops = stressed.map((p) => Math.max(0, base - p));
-    const worst = Math.max(...drops);
+    const rows: TornadoRow[] = inputs.map(({ name, up, down }) => {
+      const pUp = estimatePSuccess(up);
+      const pDown = estimatePSuccess(down);
+      return {
+        name,
+        pBase,
+        pUp,
+        pDown,
+        deltaUp: pUp - pBase,
+        deltaDown: pDown - pBase,
+      };
+    });
 
-    const result: RobustnessResult =
-      worst < 0.1
-        ? { level: "Robust", color: "🟢", drop: worst, base, stressed }
-        : worst < 0.25
-        ? { level: "Sensitive", color: "🟡", drop: worst, base, stressed }
-        : { level: "Fragile", color: "🔴", drop: worst, base, stressed };
+    // Sort by total swing (largest impact first)
+    rows.sort(
+      (a, b) =>
+        Math.abs(b.deltaUp - b.deltaDown) - Math.abs(a.deltaUp - a.deltaDown)
+    );
 
-    const out: RobustnessOut = { type: "robustness_done", id: msg.id, result };
+    const out: SensitivityOut = {
+      type: "sensitivity_done",
+      id: msg.id,
+      rows,
+      pBase,
+    };
     self.postMessage(out);
   } catch (e) {
-    const out: RobustnessOut = {
+    const out: SensitivityOut = {
       type: "error",
       id: msg.id,
       message: e instanceof Error ? e.message : "Unknown error",

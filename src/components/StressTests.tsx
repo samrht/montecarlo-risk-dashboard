@@ -37,40 +37,54 @@ export default function StressTests({
         <Button onClick={add}>+ Add</Button>
       </div>
 
-      <div className="mt-2 space-y-2">
-        {stressTests.map((s) => (
-          <div key={s.id} className="grid grid-cols-12 items-center gap-2">
-            <Input
-              className="col-span-6"
-              value={s.label}
-              onChange={(e) => update(s.id, { label: e.target.value })}
-            />
-            <Input
-              className="col-span-2"
-              type="number"
-              step="0.01"
-              value={s.returnHaircut}
-              onChange={(e) =>
-                update(s.id, { returnHaircut: Number(e.target.value) })
-              }
-            />
-            <Input
-              className="col-span-2"
-              type="number"
-              step="0.1"
-              value={s.volMultiplier}
-              onChange={(e) =>
-                update(s.id, { volMultiplier: Number(e.target.value) })
-              }
-            />
-            <div className="col-span-2 flex justify-end">
-              <Button variant="danger" onClick={() => remove(s.id)}>
-                Delete
-              </Button>
-            </div>
+      {stressTests.length > 0 && (
+        <>
+          {/* Column headers */}
+          <div className="mt-2 grid grid-cols-12 gap-2 text-xs text-zinc-400">
+            <div className="col-span-6">Label</div>
+            <div className="col-span-2">Haircut</div>
+            <div className="col-span-2">Vol ×</div>
+            <div className="col-span-2" />
           </div>
-        ))}
-      </div>
+
+          <div className="mt-1 space-y-2">
+            {stressTests.map((s) => (
+              <div key={s.id} className="grid grid-cols-12 items-center gap-2">
+                <Input
+                  className="col-span-6"
+                  value={s.label}
+                  onChange={(e) => update(s.id, { label: e.target.value })}
+                />
+                <Input
+                  className="col-span-2"
+                  type="number"
+                  step="0.01"
+                  value={s.returnHaircut}
+                  title="Return haircut (e.g. 0.02 = subtract 2% from annual return)"
+                  onChange={(e) =>
+                    update(s.id, { returnHaircut: Number(e.target.value) })
+                  }
+                />
+                <Input
+                  className="col-span-2"
+                  type="number"
+                  step="0.1"
+                  value={s.volMultiplier}
+                  title="Volatility multiplier (e.g. 1.5 = 50% higher vol)"
+                  onChange={(e) =>
+                    update(s.id, { volMultiplier: Number(e.target.value) })
+                  }
+                />
+                <div className="col-span-2 flex justify-end">
+                  <Button variant="danger" onClick={() => remove(s.id)}>
+                    Delete
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </Card>
   );
 }

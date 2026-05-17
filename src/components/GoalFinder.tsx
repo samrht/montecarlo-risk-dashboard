@@ -6,7 +6,6 @@ function inr(n: number) {
   return "₹" + Math.round(n).toLocaleString("en-IN");
 }
 
-/** quantile q in [0,1] */
 function quantile(arr: number[], q: number) {
   if (arr.length === 0) return 0;
   const xs = [...arr].sort((a, b) => a - b);
@@ -19,10 +18,18 @@ function quantile(arr: number[], q: number) {
   return xs[base];
 }
 
-export default function GoalFinder({ res }: { res: Results }) {
-  const [targetPct, setTargetPct] = React.useState(80);
+const MIN_PCT = 1;
+const MAX_PCT = 99;
 
-  const p = Math.min(Math.max(targetPct / 100, 0.01), 0.99);
+export default function GoalFinder({ res }: { res: Results }) {
+  const [raw, setRaw] = React.useState("80");
+
+  const parsed = Number(raw);
+  const isInvalid = isNaN(parsed) || raw.trim() === "";
+  const clamped = Math.min(Math.max(parsed, MIN_PCT), MAX_PCT);
+  const wasClamped = !isInvalid && clamped !== parsed;
+
+  const p = clamped / 100;
   const goal = quantile(res.terminal, 1 - p);
 
   return (
@@ -39,22 +46,42 @@ export default function GoalFinder({ res }: { res: Results }) {
           </label>
           <Input
             type="number"
-            min={1}
-            max={99}
+            min={MIN_PCT}
+            max={MAX_PCT}
             step={1}
-            value={targetPct}
-            onChange={(e) => setTargetPct(Number(e.target.value))}
+            value={raw}
+            onChange={(e) => setRaw(e.target.value)}
+            onBlur={() => {
+              // Snap display to clamped value on blur
+              if (!isInvalid) setRaw(String(clamped));
+            }}
           />
+          {wasClamped && (
+            <div className="mt-1 text-xs text-amber-400">
+              Clamped to {clamped}% (valid range: {MIN_PCT}–{MAX_PCT}%)
+            </div>
+          )}
+          {isInvalid && (
+            <div className="mt-1 text-xs text-rose-400">
+              Enter a number between {MIN_PCT} and {MAX_PCT}
+            </div>
+          )}
         </div>
 
         <div className="col-span-12 sm:col-span-8">
           <div className="text-xs text-zinc-400">Implied goal (future ₹)</div>
-          <div className="mt-1 text-2xl font-bold text-emerald-300">
-            {inr(goal)}
-          </div>
-          <div className="mt-1 text-xs text-zinc-400">
-            P(terminal ≥ goal) ≈ {targetPct}%
-          </div>
+          {isInvalid ? (
+            <div className="mt-1 text-2xl font-bold text-zinc-500">—</div>
+          ) : (
+            <>
+              <div className="mt-1 text-2xl font-bold text-emerald-300">
+                {inr(goal)}
+              </div>
+              <div className="mt-1 text-xs text-zinc-400">
+                P(terminal ≥ goal) ≈ {clamped}%
+              </div>
+            </>
+          )}
         </div>
       </div>
 
