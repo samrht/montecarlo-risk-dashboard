@@ -40,6 +40,31 @@ const DEFAULT: Config = {
       volMultiplier: 1.5,
     },
   ],
+
+  // Advanced features — all disabled by default
+  glidePath: {
+    enabled: false,
+    endWeights: [0.4, 0.45, 0.15], // shifts toward bonds over time
+  },
+  taxConfig: {
+    enabled: false,
+    ltcgRate: 0.10,
+    stcgRate: 0.15,
+    debtTaxRate: 0.30,
+    equityAssetIndices: [0], // index 0 = Equity by default
+  },
+  regimeConfig: {
+    enabled: false,
+    pBullBull: 0.97,
+    pBearBear: 0.80,
+    bearReturnShift: -0.08,
+    bearVolMult: 1.5,
+  },
+  panicConfig: {
+    enabled: false,
+    threshold: 0.20,
+    pauseMonths: 6,
+  },
 };
 
 type StressRow = { label: string; res: Results };

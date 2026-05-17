@@ -4,6 +4,10 @@ import AssetsTable from "../AssetsTable";
 import CorrMatrix from "../CorrMatrix";
 import StressTests from "../StressTests";
 import AllocDonut from "../widgets/AllocDonut";
+import GlidePathConfig from "../GlidePathConfig";
+import TaxConfigPanel from "../TaxConfig";
+import RegimeConfigPanel from "../RegimeConfig";
+import PanicConfigPanel from "../PanicConfig";
 
 const RETURN_MODELS: ReturnModel[] = ["normal", "t"];
 const REBALANCE_FREQS: RebalanceFreq[] = [
@@ -22,7 +26,7 @@ export default function BuilderView({
 }) {
   return (
     <div className="animate-fade-in grid grid-cols-12 gap-4">
-      {/* Left column: Goal + Model */}
+      {/* Left column: Goal + Model + Advanced Features */}
       <div className="col-span-12 space-y-4 xl:col-span-7">
         <Card className="bg-white/5">
           <SectionTitle
@@ -150,7 +154,6 @@ export default function BuilderView({
               </Select>
             </div>
 
-            {/* Only show df when model is Student-t */}
             {cfg.model === "t" ? (
               <div>
                 <Label>Degrees of freedom (df)</Label>
@@ -224,6 +227,37 @@ export default function BuilderView({
           assets={cfg.assets}
           onChange={(assets) => setCfg({ ...cfg, assets, corr: null })}
         />
+
+        {/* ── Advanced Engine Features ─────────────────────────────────── */}
+        {cfg.glidePath && (
+          <GlidePathConfig
+            glidePath={cfg.glidePath}
+            assets={cfg.assets}
+            onChange={(glidePath) => setCfg({ ...cfg, glidePath })}
+          />
+        )}
+
+        {cfg.taxConfig && (
+          <TaxConfigPanel
+            taxConfig={cfg.taxConfig}
+            assets={cfg.assets}
+            onChange={(taxConfig) => setCfg({ ...cfg, taxConfig })}
+          />
+        )}
+
+        {cfg.regimeConfig && (
+          <RegimeConfigPanel
+            regimeConfig={cfg.regimeConfig}
+            onChange={(regimeConfig) => setCfg({ ...cfg, regimeConfig })}
+          />
+        )}
+
+        {cfg.panicConfig && (
+          <PanicConfigPanel
+            panicConfig={cfg.panicConfig}
+            onChange={(panicConfig) => setCfg({ ...cfg, panicConfig })}
+          />
+        )}
       </div>
 
       {/* Right column: allocation + corr + stress */}

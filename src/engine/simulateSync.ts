@@ -5,21 +5,24 @@
  * ActionEngine and RobustnessBox produce results consistent with
  * the main simulation run.
  *
- * Supports:
- *  - Weight normalization
+ * Supports all features of compute.ts:
+ *  - Weight normalization + glide-path
  *  - Cholesky-decomposed correlated returns
  *  - Normal and Student-t return distributions
- *  - SIP caps (income % and absolute)
+ *  - SIP caps (income % and absolute) + panic behavior
  *  - Rebalancing (monthly / quarterly / annual / none)
  *  - TER fee drag
+ *  - Tax drag (LTCG equity, income tax debt)
+ *  - Regime-switching (bull/bear Markov chain)
  */
 
-import type { Config, Results } from "./types";
+import type { Config, Results, StressTest } from "./types";
 import {
   annualToMonthly,
   cholesky,
   cvarLower,
   matVec,
+  mulberry32,
   normalizeWeights,
   percentile,
   percentiles,
@@ -27,15 +30,13 @@ import {
   randn,
 } from "./math";
 
-/* ---------- helpers ---------- */
-
-function identity(n: number): number[][] {
+function identity(n: number) {
   return Array.from({ length: n }, (_, i) =>
     Array.from({ length: n }, (_, j) => (i === j ? 1 : 0))
   );
 }
 
-function maxDrawdown(path: number[]): number {
+function maxDrawdown(path: number[]) {
   let peak = path[0];
   let mdd = 0;
   for (const v of path) {
@@ -43,25 +44,47 @@ function maxDrawdown(path: number[]): number {
     const dd = (v - peak) / peak;
     if (dd < mdd) mdd = dd;
   }
-  return mdd; // negative fraction, e.g. -0.3 = -30%
+  return mdd;
 }
 
-/* ---------- synchronous Monte Carlo ---------- */
+function glideWeights(
+  startW: number[],
+  endW: number[],
+  t: number,
+  totalMonths: number
+): number[] {
+  const frac = totalMonths <= 1 ? 1 : t / (totalMonths - 1);
+  return startW.map((s, i) => s + (endW[i] - s) * Math.min(1, Math.max(0, frac)));
+}
 
-export function runMonteCarloSync(cfg: Config): Results {
+export function simulateSync(
+  cfg: Config,
+  stress: StressTest | null = null
+): Results {
   const months = Math.max(1, Math.floor(cfg.years * 12));
   const n = cfg.assets.length;
   if (n < 1) throw new Error("Add at least one asset.");
 
-  // Normalize weights
-  const w = normalizeWeights(cfg.assets.map((a) => a.weight));
+  const haircut = stress?.returnHaircut ?? 0;
+  const volMult = stress?.volMultiplier ?? 1;
 
-  // Correlation / Cholesky
-  const corr =
-    cfg.corr && cfg.corr.length === n ? cfg.corr : identity(n);
+  const assets = cfg.assets.map((a) => ({
+    ...a,
+    muAnnual: a.muAnnual - haircut,
+    sigmaAnnual: a.sigmaAnnual * volMult,
+  }));
+
+  const baseW = normalizeWeights(assets.map((a) => a.weight));
+
+  const glide = cfg.glidePath;
+  const glideEnabled = glide?.enabled && glide.endWeights.length === n;
+  const endW = glideEnabled ? normalizeWeights(glide!.endWeights) : baseW;
+
+  const corr = cfg.corr && cfg.corr.length === n ? cfg.corr : identity(n);
   const L = cholesky(corr);
 
-  // Effective SIP after contribution caps
+  const rand = mulberry32(cfg.seed + (stress ? 999 : 0));
+
   let sipEff = cfg.sipMonthly;
   if (typeof cfg.incomeMonthly === "number") {
     sipEff = Math.min(sipEff, cfg.sipCapPct * cfg.incomeMonthly);
@@ -70,14 +93,10 @@ export function runMonteCarloSync(cfg: Config): Results {
     sipEff = Math.min(sipEff, cfg.contribCapMonthly);
   }
 
-  // Inflation-adjusted goal
   const goalFuture =
     cfg.goalToday * Math.pow(1 + cfg.inflationAnnual, cfg.years);
-
-  // Monthly TER fee multiplier
   const feeM = Math.pow(1 - cfg.terAnnual, 1 / 12) - 1;
 
-  // Rebalance cadence
   const rebalanceEvery =
     cfg.rebalanceFreq === "none"
       ? null
@@ -85,33 +104,69 @@ export function runMonteCarloSync(cfg: Config): Results {
       ? 1
       : cfg.rebalanceFreq === "quarterly"
       ? 3
-      : 12; // annual
+      : 12;
 
-  // Use Math.random() as the PRNG for the sync path (no seed needed —
-  // workers/action engine runs are exploratory, not display-critical)
-  const rand = Math.random.bind(Math);
+  const tax = cfg.taxConfig;
+  const taxEnabled = tax?.enabled ?? false;
+  const equitySet = new Set(tax?.equityAssetIndices ?? []);
+
+  const regime = cfg.regimeConfig;
+  const regimeEnabled = regime?.enabled ?? false;
+
+  const panic = cfg.panicConfig;
+  const panicEnabled = panic?.enabled ?? false;
 
   const terminal: number[] = [];
   const mdd: number[] = [];
   const samplePaths: number[][] = [];
-  const keepPaths = 25;
+  const keepPaths = 120;
   let successCount = 0;
 
   for (let s = 0; s < cfg.nSims; s++) {
-    let holdings = w.map((wi) => cfg.lumpSum * wi);
+    const w0 = glideEnabled ? glideWeights(baseW, endW, 0, months) : baseW;
+    let holdings = w0.map((wi) => cfg.lumpSum * wi);
 
     const path: number[] = new Array(months + 1);
     path[0] = holdings.reduce((a, b) => a + b, 0);
 
-    for (let t = 1; t <= months; t++) {
-      // Add SIP contribution proportional to weights
-      for (let i = 0; i < n; i++) holdings[i] += sipEff * w[i];
+    let isBull = true;
+    let peakForPanic = path[0];
+    let panicMonthsLeft = 0;
+    let costBasis = [...holdings];
 
-      // Correlated standard-normal draws
-      const z = Array.from({ length: n }, () => randn(rand));
+    for (let t = 1; t <= months; t++) {
+      if (regimeEnabled) {
+        const p = rand();
+        if (isBull) {
+          isBull = p < regime!.pBullBull;
+        } else {
+          isBull = p >= regime!.pBearBear;
+        }
+      }
+
+      const wt = glideEnabled ? glideWeights(baseW, endW, t - 1, months) : baseW;
+
+      const portfolioVal = holdings.reduce((a, b) => a + b, 0);
+      if (panicEnabled) {
+        if (portfolioVal > peakForPanic) peakForPanic = portfolioVal;
+        const dd = peakForPanic > 0 ? (peakForPanic - portfolioVal) / peakForPanic : 0;
+        if (dd >= panic!.threshold && panicMonthsLeft === 0) {
+          panicMonthsLeft = panic!.pauseMonths;
+        }
+      }
+
+      const sipThisMonth = panicEnabled && panicMonthsLeft > 0 ? 0 : sipEff;
+      if (panicEnabled && panicMonthsLeft > 0) panicMonthsLeft--;
+
+      for (let i = 0; i < n; i++) {
+        const contrib = sipThisMonth * wt[i];
+        holdings[i] += contrib;
+        costBasis[i] += contrib;
+      }
+
+      const z = new Array(n).fill(0).map(() => randn(rand));
       const zc = matVec(L, z);
 
-      // Student-t scaling
       let scale = 1;
       if (cfg.model === "t") {
         const df = Math.max(2, Math.floor(cfg.df));
@@ -119,54 +174,79 @@ export function runMonteCarloSync(cfg: Config): Results {
         scale = Math.sqrt(df / (chi || 1e-12));
       }
 
-      // Apply returns to each asset holding
       for (let i = 0; i < n; i++) {
-        const { muM, sigmaM } = annualToMonthly(
-          cfg.assets[i].muAnnual,
-          cfg.assets[i].sigmaAnnual
+        let { muM, sigmaM } = annualToMonthly(
+          assets[i].muAnnual,
+          assets[i].sigmaAnnual
         );
+        if (regimeEnabled && !isBull) {
+          muM += regime!.bearReturnShift / 12;
+          sigmaM *= regime!.bearVolMult;
+        }
         const r = muM + sigmaM * zc[i] * scale;
         holdings[i] *= 1 + r;
       }
 
-      // Rebalance if due
       if (rebalanceEvery && t % rebalanceEvery === 0) {
         const total = holdings.reduce((a, b) => a + b, 0);
-        holdings = w.map((wi) => total * wi);
+        holdings = wt.map((wi) => total * wi);
+        if (taxEnabled) {
+          const totalBasis = costBasis.reduce((a, b) => a + b, 0);
+          costBasis = wt.map((wi) => totalBasis * wi);
+        }
       }
 
-      // Apply TER fee drag
       const totalBeforeFee = holdings.reduce((a, b) => a + b, 0);
       const totalAfterFee = totalBeforeFee * (1 + feeM);
       const k = totalBeforeFee > 0 ? totalAfterFee / totalBeforeFee : 1;
       for (let i = 0; i < n; i++) holdings[i] *= k;
 
-      path[t] = totalAfterFee;
+      if (taxEnabled) {
+        for (let i = 0; i < n; i++) {
+          if (!equitySet.has(i)) {
+            const gain = Math.max(0, holdings[i] - costBasis[i]);
+            holdings[i] -= gain * tax!.debtTaxRate;
+            costBasis[i] = holdings[i];
+          }
+        }
+        if (t % 12 === 0) {
+          for (let i = 0; i < n; i++) {
+            if (equitySet.has(i)) {
+              const gain = Math.max(0, holdings[i] - costBasis[i]);
+              holdings[i] -= gain * tax!.ltcgRate;
+              costBasis[i] = holdings[i];
+            }
+          }
+        }
+      }
+
+      path[t] = holdings.reduce((a, b) => a + b, 0);
     }
 
     const term = path[months];
     terminal.push(term);
     if (term >= goalFuture) successCount++;
-
     mdd.push(maxDrawdown(path));
 
-    if (s < keepPaths) samplePaths.push(path);
+    if (
+      samplePaths.length < keepPaths &&
+      s % Math.floor(cfg.nSims / keepPaths || 1) === 0
+    ) {
+      samplePaths.push(path);
+    }
   }
 
   const pSuccess = successCount / cfg.nSims;
-  const pFail = 1 - pSuccess;
-
   const var5 = percentile(terminal, 5);
   const var1 = percentile(terminal, 1);
   const cvar5 = cvarLower(terminal, 0.05);
-  const shortfall5 = Math.max(0, goalFuture - var5);
 
   return {
     meta: {
       nSims: cfg.nSims,
       months,
       assets: cfg.assets.map((a) => a.name),
-      weights: w,
+      weights: baseW,
       model: cfg.model,
       df: cfg.df,
       rebalanceFreq: cfg.rebalanceFreq,
@@ -174,7 +254,7 @@ export function runMonteCarloSync(cfg: Config): Results {
     goalFuture,
     sipEffective: sipEff,
     pSuccess,
-    pFail,
+    pFail: 1 - pSuccess,
     terminal,
     mdd,
     samplePaths,
@@ -183,6 +263,9 @@ export function runMonteCarloSync(cfg: Config): Results {
     var5,
     var1,
     cvar5,
-    shortfall5,
+    shortfall5: Math.max(0, goalFuture - var5),
   };
 }
+
+// Alias for backward compatibility with actionEngine.ts and robustness.ts
+export { simulateSync as runMonteCarloSync };

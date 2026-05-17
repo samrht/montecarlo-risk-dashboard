@@ -29,6 +29,17 @@ function maxDrawdown(path: number[]) {
   return mdd;
 }
 
+/** Linear interpolation of weights from startW → endW over totalMonths */
+function glideWeights(
+  startW: number[],
+  endW: number[],
+  t: number,
+  totalMonths: number
+): number[] {
+  const frac = totalMonths <= 1 ? 1 : t / (totalMonths - 1);
+  return startW.map((s, i) => s + (endW[i] - s) * Math.min(1, Math.max(0, frac)));
+}
+
 export function runMonteCarlo(
   cfg: Config,
   stress: StressTest | null,
@@ -48,7 +59,12 @@ export function runMonteCarlo(
     sigmaAnnual: a.sigmaAnnual * volMult,
   }));
 
-  const w = normalizeWeights(assets.map((a) => a.weight));
+  const baseW = normalizeWeights(assets.map((a) => a.weight));
+
+  // Glide-path end weights (normalised)
+  const glide = cfg.glidePath;
+  const glideEnabled = glide?.enabled && glide.endWeights.length === n;
+  const endW = glideEnabled ? normalizeWeights(glide!.endWeights) : baseW;
 
   const corr = cfg.corr && cfg.corr.length === n ? cfg.corr : identity(n);
   const L = cholesky(corr);
@@ -76,6 +92,19 @@ export function runMonteCarlo(
       ? 3
       : 12;
 
+  // Tax config
+  const tax = cfg.taxConfig;
+  const taxEnabled = tax?.enabled ?? false;
+  const equitySet = new Set(tax?.equityAssetIndices ?? []);
+
+  // Regime config
+  const regime = cfg.regimeConfig;
+  const regimeEnabled = regime?.enabled ?? false;
+
+  // Panic config
+  const panic = cfg.panicConfig;
+  const panicEnabled = panic?.enabled ?? false;
+
   const terminal: number[] = [];
   const mdd: number[] = [];
   const samplePaths: number[][] = [];
@@ -87,13 +116,58 @@ export function runMonteCarlo(
     if (shouldCancel?.()) throw new Error("Cancelled");
     if (s % 200 === 0) onProgress?.(s / cfg.nSims);
 
-    let holdings = w.map((wi) => cfg.lumpSum * wi);
+    // Compute initial weights (month 0)
+    const w0 = glideEnabled ? glideWeights(baseW, endW, 0, months) : baseW;
+    let holdings = w0.map((wi) => cfg.lumpSum * wi);
+
     const path: number[] = new Array(months + 1);
     path[0] = holdings.reduce((a, b) => a + b, 0);
 
-    for (let t = 1; t <= months; t++) {
-      for (let i = 0; i < n; i++) holdings[i] += sipEff * w[i];
+    // Regime state: start in bull
+    let isBull = true;
 
+    // Panic state
+    let peakForPanic = path[0];
+    let panicMonthsLeft = 0;
+
+    // Tax basis tracking (cost basis per asset for LTCG)
+    let costBasis = [...holdings];
+
+    for (let t = 1; t <= months; t++) {
+      // ── Regime transition ────────────────────────────────────────────────
+      if (regimeEnabled) {
+        const p = rand();
+        if (isBull) {
+          isBull = p < regime!.pBullBull;
+        } else {
+          isBull = p >= regime!.pBearBear;
+        }
+      }
+
+      // ── Glide-path weights for this month ────────────────────────────────
+      const wt = glideEnabled ? glideWeights(baseW, endW, t - 1, months) : baseW;
+
+      // ── Panic check: update peak, determine SIP pause ────────────────────
+      const portfolioVal = holdings.reduce((a, b) => a + b, 0);
+      if (panicEnabled) {
+        if (portfolioVal > peakForPanic) peakForPanic = portfolioVal;
+        const dd = peakForPanic > 0 ? (peakForPanic - portfolioVal) / peakForPanic : 0;
+        if (dd >= panic!.threshold && panicMonthsLeft === 0) {
+          panicMonthsLeft = panic!.pauseMonths;
+        }
+      }
+
+      // ── SIP contribution ─────────────────────────────────────────────────
+      const sipThisMonth = panicEnabled && panicMonthsLeft > 0 ? 0 : sipEff;
+      if (panicEnabled && panicMonthsLeft > 0) panicMonthsLeft--;
+
+      for (let i = 0; i < n; i++) {
+        const contrib = sipThisMonth * wt[i];
+        holdings[i] += contrib;
+        costBasis[i] += contrib;
+      }
+
+      // ── Returns (with regime shift) ───────────────────────────────────────
       const z = new Array(n).fill(0).map(() => randn(rand));
       const zc = matVec(L, z);
 
@@ -105,25 +179,65 @@ export function runMonteCarlo(
       }
 
       for (let i = 0; i < n; i++) {
-        const { muM, sigmaM } = annualToMonthly(
+        let { muM, sigmaM } = annualToMonthly(
           assets[i].muAnnual,
           assets[i].sigmaAnnual
         );
+
+        // Bear regime: shift return down, inflate vol
+        if (regimeEnabled && !isBull) {
+          const bearShiftM = regime!.bearReturnShift / 12;
+          muM += bearShiftM;
+          sigmaM *= regime!.bearVolMult;
+        }
+
         const r = muM + sigmaM * zc[i] * scale;
         holdings[i] *= 1 + r;
       }
 
+      // ── Rebalancing ───────────────────────────────────────────────────────
       if (rebalanceEvery && t % rebalanceEvery === 0) {
         const total = holdings.reduce((a, b) => a + b, 0);
-        holdings = w.map((wi) => total * wi);
+        holdings = wt.map((wi) => total * wi);
+        // Reset cost basis proportionally after rebalance
+        if (taxEnabled) {
+          const totalBasis = costBasis.reduce((a, b) => a + b, 0);
+          costBasis = wt.map((wi) => totalBasis * wi);
+        }
       }
 
+      // ── Fees ──────────────────────────────────────────────────────────────
       const totalBeforeFee = holdings.reduce((a, b) => a + b, 0);
       const totalAfterFee = totalBeforeFee * (1 + feeM);
       const k = totalBeforeFee > 0 ? totalAfterFee / totalBeforeFee : 1;
       for (let i = 0; i < n; i++) holdings[i] *= k;
 
-      path[t] = totalAfterFee;
+      // ── Tax drag ─────────────────────────────────────────────────────────
+      if (taxEnabled) {
+        // Debt: income tax on gains every month
+        for (let i = 0; i < n; i++) {
+          if (!equitySet.has(i)) {
+            const gain = Math.max(0, holdings[i] - costBasis[i]);
+            const taxDue = gain * tax!.debtTaxRate;
+            holdings[i] -= taxDue;
+            costBasis[i] = holdings[i]; // step up basis
+          }
+        }
+
+        // Equity: LTCG annually (every 12 months)
+        if (t % 12 === 0) {
+          for (let i = 0; i < n; i++) {
+            if (equitySet.has(i)) {
+              const gain = Math.max(0, holdings[i] - costBasis[i]);
+              const taxDue = gain * tax!.ltcgRate;
+              holdings[i] -= taxDue;
+              costBasis[i] = holdings[i]; // step up basis
+            }
+          }
+        }
+      }
+
+      path[t] = holdings.reduce((a, b) => a + b, 0);
     }
 
     const term = path[months];
@@ -155,7 +269,7 @@ export function runMonteCarlo(
       nSims: cfg.nSims,
       months,
       assets: cfg.assets.map((a) => a.name),
-      weights: w,
+      weights: baseW,
       model: cfg.model,
       df: cfg.df,
       rebalanceFreq: cfg.rebalanceFreq,
