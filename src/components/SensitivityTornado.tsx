@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import type { Config, Results } from "../engine/types";
+import type { Config } from "../engine/types";
 import { runSensitivity } from "../engine/sensitivityClient";
 import type { TornadoRow } from "../engine/sensitivity.worker";
 import { Card, SectionTitle } from "./ui";
@@ -72,10 +72,8 @@ function TornadoTooltip({
 }
 
 export default function SensitivityTornado({
-  base,
   cfg,
 }: {
-  base: Results;
   cfg: Config;
 }) {
   const [state, setState] = useState<TState>({ kind: "idle" });

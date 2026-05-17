@@ -68,7 +68,7 @@ export default function DashboardView({
         </div>
 
         {/* Sensitivity */}
-        <SensitivityTornado base={baseRes} cfg={cfg} />
+        <SensitivityTornado cfg={cfg} />
 
         {/* Detailed outputs */}
         <ResultsPanel label="Base" res={baseRes} />
