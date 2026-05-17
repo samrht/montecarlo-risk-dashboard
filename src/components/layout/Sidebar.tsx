@@ -6,10 +6,12 @@ export default function Sidebar({
   active,
   onNav,
   hasResults,
+  onOpenGuide,
 }: {
   active: NavKey;
   onNav: (k: NavKey) => void;
   hasResults: boolean;
+  onOpenGuide: () => void;
 }) {
   const item = (
     k: NavKey,
@@ -67,6 +69,20 @@ export default function Sidebar({
           !hasResults
         )}
       </nav>
+
+      {/* How to use */}
+      <button
+        onClick={onOpenGuide}
+        className="w-full rounded-2xl border border-indigo-500/20 bg-indigo-500/5 p-3 text-left transition-all hover:border-indigo-500/40 hover:bg-indigo-500/10"
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-base">📖</span>
+          <div>
+            <div className="text-sm font-semibold text-indigo-300">How to use</div>
+            <div className="text-xs text-zinc-500">Beginner's guide</div>
+          </div>
+        </div>
+      </button>
 
       {/* Footer */}
       <div className="mt-auto text-xs text-zinc-600 px-1">

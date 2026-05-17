@@ -1,19 +1,499 @@
-import html2canvas from "html2canvas";
-import jsPDF from "jspdf";
+/**
+ * exportPdf.ts
+ *
+ * Generates a structured multi-page PDF report directly from simulation
+ * data using jsPDF. Does NOT use html2canvas — DOM capture is unreliable
+ * with SVG charts, dark backgrounds, and Web Worker state.
+ */
 
-export async function exportDashboardPdf(el: HTMLElement) {
-  const canvas = await html2canvas(el, {
-    scale: 2,
-    backgroundColor: "#09090b",
+import jsPDF from "jspdf";
+import type { Config, Results } from "../engine/types";
+
+/* ---------- helpers ---------- */
+
+function inr(n: number): string {
+  if (Math.abs(n) >= 1e7) return `Rs.${(n / 1e7).toFixed(2)}Cr`;
+  if (Math.abs(n) >= 1e5) return `Rs.${(n / 1e5).toFixed(1)}L`;
+  return "Rs." + Math.round(n).toLocaleString("en-IN");
+}
+
+function pct(n: number): string {
+  return (n * 100).toFixed(1) + "%";
+}
+
+const PAGE_W = 210; // A4 mm
+const PAGE_H = 297;
+const MARGIN = 16;
+const COL = PAGE_W - MARGIN * 2;
+
+/* ---------- drawing primitives ---------- */
+
+type Doc = jsPDF;
+
+function hexToRgb(hex: string): [number, number, number] {
+  const r = parseInt(hex.slice(1, 3), 16);
+  const g = parseInt(hex.slice(3, 5), 16);
+  const b = parseInt(hex.slice(5, 7), 16);
+  return [r, g, b];
+}
+
+function setFill(doc: Doc, hex: string) {
+  doc.setFillColor(...hexToRgb(hex));
+}
+function setTextColor(doc: Doc, hex: string) {
+  doc.setTextColor(...hexToRgb(hex));
+}
+function setDrawColor(doc: Doc, hex: string) {
+  doc.setDrawColor(...hexToRgb(hex));
+}
+
+/** Draw a filled rounded rect */
+function rect(doc: Doc, x: number, y: number, w: number, h: number, fill: string, r = 3) {
+  setFill(doc, fill);
+  doc.roundedRect(x, y, w, h, r, r, "F");
+}
+
+/** Draw a horizontal rule */
+function rule(doc: Doc, y: number, color = "#27272a") {
+  setDrawColor(doc, color);
+  doc.setLineWidth(0.3);
+  doc.line(MARGIN, y, PAGE_W - MARGIN, y);
+}
+
+/** Wrapped text, returns new Y */
+function text(
+  doc: Doc,
+  content: string,
+  x: number,
+  y: number,
+  opts: {
+    size?: number;
+    color?: string;
+    bold?: boolean;
+    maxWidth?: number;
+    align?: "left" | "center" | "right";
+  } = {}
+): number {
+  const { size = 9, color = "#e4e4e7", bold = false, maxWidth, align = "left" } = opts;
+  doc.setFontSize(size);
+  setTextColor(doc, color);
+  doc.setFont("helvetica", bold ? "bold" : "normal");
+
+  if (maxWidth) {
+    const lines = doc.splitTextToSize(content, maxWidth) as string[];
+    doc.text(lines, x, y, { align });
+    return y + lines.length * (size * 0.4);
+  }
+
+  doc.text(content, x, y, { align });
+  return y + size * 0.4;
+}
+
+/** KPI tile: small colored card */
+function kpiTile(
+  doc: Doc,
+  x: number,
+  y: number,
+  w: number,
+  label: string,
+  value: string,
+  sub: string,
+  accent: string
+) {
+  rect(doc, x, y, w, 22, "#18181b", 3);
+  // accent bar
+  setFill(doc, accent);
+  doc.roundedRect(x, y, 3, 22, 1.5, 1.5, "F");
+
+  text(doc, label, x + 6, y + 6, { size: 7, color: "#a1a1aa" });
+  text(doc, value, x + 6, y + 13, { size: 11, color: "#ffffff", bold: true });
+  text(doc, sub, x + 6, y + 19, { size: 7, color: "#71717a" });
+}
+
+/** Section heading */
+function sectionHead(doc: Doc, y: number, title: string): number {
+  rect(doc, MARGIN, y, COL, 8, "#1e1b4b", 2);
+  text(doc, title.toUpperCase(), MARGIN + 4, y + 5.5, {
+    size: 8,
+    color: "#a5b4fc",
+    bold: true,
+  });
+  return y + 12;
+}
+
+
+/** Simple sparkline from terminal percentile data */
+function sparkline(
+  doc: Doc,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  values: number[],
+  color: string
+) {
+  if (values.length < 2) return;
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min || 1;
+
+  const pts = values.map((v, i) => ({
+    px: x + (i / (values.length - 1)) * w,
+    py: y + h - ((v - min) / range) * h,
+  }));
+
+  setDrawColor(doc, color);
+  doc.setLineWidth(0.5);
+  for (let i = 1; i < pts.length; i++) {
+    doc.line(pts[i - 1].px, pts[i - 1].py, pts[i].px, pts[i].py);
+  }
+}
+
+/* ---------- page helpers ---------- */
+
+let currentPage = 1;
+let pageY = 0;
+
+function newPage(doc: Doc, title: string) {
+  doc.addPage();
+  currentPage++;
+  pageY = drawPageHeader(doc, title);
+}
+
+
+function drawPageHeader(doc: Doc, sectionTitle: string): number {
+  rect(doc, 0, 0, PAGE_W, 12, "#09090b");
+  text(doc, "Monte Carlo Risk Dashboard", MARGIN, 8, {
+    size: 8,
+    color: "#6366f1",
+    bold: true,
+  });
+  text(doc, sectionTitle, PAGE_W - MARGIN, 8, {
+    size: 7,
+    color: "#71717a",
+    align: "right",
+  });
+  text(doc, `Page ${currentPage}`, PAGE_W / 2, 8, {
+    size: 7,
+    color: "#52525b",
+    align: "center",
+  });
+  return 18;
+}
+
+function drawFooter(doc: Doc, totalPages: number) {
+  const pageCount = doc.getNumberOfPages();
+  for (let i = 1; i <= pageCount; i++) {
+    doc.setPage(i);
+    rect(doc, 0, PAGE_H - 10, PAGE_W, 10, "#09090b");
+    text(
+      doc,
+      "Generated by Monte Carlo Lab · All results are probabilistic estimates, not financial advice.",
+      PAGE_W / 2,
+      PAGE_H - 4,
+      { size: 6, color: "#52525b", align: "center" }
+    );
+    // fix page numbers
+    text(doc, `Page ${i} of ${totalPages}`, PAGE_W - MARGIN, PAGE_H - 4, {
+      size: 6,
+      color: "#52525b",
+      align: "right",
+    });
+  }
+}
+
+/* ---------- main export function ---------- */
+
+export async function exportDashboardPdf(
+  cfg: Config,
+  baseRes: Results,
+  stressRes: { label: string; res: Results }[]
+): Promise<void> {
+  const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a4" });
+  currentPage = 1;
+
+  // ── Cover page ──────────────────────────────────────────────────────────
+  rect(doc, 0, 0, PAGE_W, PAGE_H, "#09090b");
+
+  // gradient-ish blobs (solid circles with transparency via opacity trick)
+  setFill(doc, "#1e1b4b");
+  doc.circle(-20, 40, 80, "F");
+  setFill(doc, "#0c2340");
+  doc.circle(PAGE_W + 20, 80, 90, "F");
+
+  text(doc, "MONTE CARLO", PAGE_W / 2, 90, {
+    size: 28,
+    color: "#6366f1",
+    bold: true,
+    align: "center",
+  });
+  text(doc, "RISK DASHBOARD", PAGE_W / 2, 103, {
+    size: 20,
+    color: "#a5b4fc",
+    bold: true,
+    align: "center",
+  });
+  text(doc, "Portfolio Risk & Goal Feasibility Report", PAGE_W / 2, 115, {
+    size: 10,
+    color: "#71717a",
+    align: "center",
   });
 
-  const imgData = canvas.toDataURL("image/png");
-  const pdf = new jsPDF("p", "mm", "a4");
+  rule(doc, 125, "#3f3f46");
 
-  const imgProps = pdf.getImageProperties(imgData);
-  const pdfWidth = pdf.internal.pageSize.getWidth();
-  const pdfHeight = (imgProps.height * pdfWidth) / imgProps.width;
+  // Summary KPIs on cover
+  const successColor =
+    baseRes.pSuccess >= 0.8 ? "#34d399" : baseRes.pSuccess >= 0.5 ? "#fbbf24" : "#f87171";
 
-  pdf.addImage(imgData, "PNG", 0, 0, pdfWidth, pdfHeight);
-  pdf.save("MonteCarlo_Dashboard.pdf");
+  text(doc, "GOAL", PAGE_W / 2, 140, { size: 8, color: "#71717a", align: "center" });
+  text(doc, inr(cfg.goalToday), PAGE_W / 2, 150, {
+    size: 16, color: "#ffffff", bold: true, align: "center",
+  });
+  text(doc, `in ${cfg.years} years · inflation-adjusted ${inr(baseRes.goalFuture)}`, PAGE_W / 2, 158, {
+    size: 8, color: "#71717a", align: "center",
+  });
+
+  text(doc, "PROBABILITY OF SUCCESS", PAGE_W / 2, 174, { size: 8, color: "#71717a", align: "center" });
+  text(doc, pct(baseRes.pSuccess), PAGE_W / 2, 186, {
+    size: 28, color: successColor, bold: true, align: "center",
+  });
+
+  text(doc, `Based on ${baseRes.meta.nSims.toLocaleString()} simulations`, PAGE_W / 2, 196, {
+    size: 8, color: "#52525b", align: "center",
+  });
+
+  const dateStr = new Date().toLocaleDateString("en-IN", {
+    year: "numeric", month: "long", day: "numeric",
+  });
+  text(doc, `Report generated ${dateStr}`, PAGE_W / 2, 270, {
+    size: 8, color: "#52525b", align: "center",
+  });
+  text(doc, "All results are probabilistic estimates · Not financial advice", PAGE_W / 2, 278, {
+    size: 7, color: "#3f3f46", align: "center",
+  });
+
+  // ── Page 2: Portfolio Setup + Key Metrics ────────────────────────────
+  doc.addPage();
+  currentPage = 2;
+  pageY = drawPageHeader(doc, "Portfolio Setup & Key Metrics");
+
+  pageY = sectionHead(doc, pageY, "Your Goal & Contributions");
+  const goalItems = [
+    ["Goal (today)", inr(cfg.goalToday)],
+    ["Inflation-adjusted goal", inr(baseRes.goalFuture)],
+    ["Horizon", `${cfg.years} years`],
+    ["Inflation rate", pct(cfg.inflationAnnual)],
+    ["Lump sum invested", inr(cfg.lumpSum)],
+    ["Monthly SIP", inr(cfg.sipMonthly)],
+    ["Effective SIP (after caps)", inr(baseRes.sipEffective)],
+  ];
+
+  let col1Y = pageY;
+  const colW = COL / 2 - 4;
+  goalItems.forEach(([label, val], i) => {
+    const cx = i % 2 === 0 ? MARGIN : MARGIN + colW + 8;
+    const cy = i % 2 === 0 ? col1Y : col1Y;
+    if (i % 2 === 0 && i > 0) col1Y += 9;
+    rect(doc, cx, cy, colW, 8, "#18181b", 2);
+    text(doc, label, cx + 3, cy + 4, { size: 6.5, color: "#a1a1aa" });
+    text(doc, val, cx + colW - 3, cy + 4, { size: 7, color: "#ffffff", bold: true, align: "right" });
+  });
+  pageY = col1Y + 14;
+
+  pageY = sectionHead(doc, pageY, "Assets & Allocation");
+
+  const totalW = cfg.assets.reduce((s, a) => s + Math.max(0, a.weight), 0) || 1;
+  const assetColors = ["#818cf8", "#22d3ee", "#34d399", "#fbbf24", "#fb7185", "#a78bfa"];
+
+  cfg.assets.forEach((a, i) => {
+    const allocPct = (Math.max(0, a.weight) / totalW) * 100;
+    const barMaxW = COL - 100;
+
+    rect(doc, MARGIN, pageY, COL, 10, "#18181b", 2);
+    // color swatch
+    setFill(doc, assetColors[i % assetColors.length]);
+    doc.circle(MARGIN + 5, pageY + 5, 2, "F");
+
+    text(doc, a.name, MARGIN + 10, pageY + 6, { size: 8, color: "#e4e4e7" });
+    text(doc, `μ ${pct(a.muAnnual)}  σ ${pct(a.sigmaAnnual)}`, MARGIN + 55, pageY + 6, { size: 7, color: "#71717a" });
+
+    // allocation bar
+    const barX = MARGIN + 95;
+    rect(doc, barX, pageY + 2.5, barMaxW, 5, "#27272a", 2);
+    setFill(doc, assetColors[i % assetColors.length]);
+    doc.roundedRect(barX, pageY + 2.5, (allocPct / 100) * barMaxW, 5, 2, 2, "F");
+
+    text(doc, `${allocPct.toFixed(1)}%`, MARGIN + COL - 1, pageY + 6, {
+      size: 7, color: "#ffffff", bold: true, align: "right",
+    });
+
+    pageY += 12;
+  });
+
+  pageY += 4;
+  pageY = sectionHead(doc, pageY, "Key Risk Metrics");
+
+  const tileW = (COL - 12) / 4;
+  kpiTile(doc, MARGIN, pageY, tileW, "P(Success)", pct(baseRes.pSuccess), `P(fail) ${pct(baseRes.pFail)}`, successColor);
+  kpiTile(doc, MARGIN + tileW + 4, pageY, tileW, "Median Outcome", inr(baseRes.terminalPercentiles["50"] ?? 0), `Goal: ${inr(baseRes.goalFuture)}`, "#818cf8");
+  kpiTile(doc, MARGIN + (tileW + 4) * 2, pageY, tileW, "VaR 5%", inr(baseRes.var5), `CVaR: ${inr(baseRes.cvar5)}`, "#f87171");
+  kpiTile(doc, MARGIN + (tileW + 4) * 3, pageY, tileW, "Median Drawdown", pct(Math.abs(baseRes.mddPercentiles["50"] ?? 0)), `Worst 5%: ${pct(Math.abs(baseRes.mddPercentiles["5"] ?? 0))}`, "#fbbf24");
+  pageY += 28;
+
+  // ── Page 3: Terminal Wealth Distribution ─────────────────────────────
+  newPage(doc, "Simulation Results");
+
+  pageY = sectionHead(doc, pageY, "Terminal Wealth Percentiles");
+
+  const percRows: [string, string, string][] = [
+    ["1st percentile (worst 1%)", inr(baseRes.terminalPercentiles["1"] ?? 0), "Catastrophic scenario"],
+    ["5th percentile (VaR)", inr(baseRes.var5), "Value at Risk"],
+    ["10th percentile", inr(baseRes.terminalPercentiles["10"] ?? 0), "Severe downside"],
+    ["25th percentile", inr(baseRes.terminalPercentiles["25"] ?? 0), "Weak outcome"],
+    ["50th percentile (median)", inr(baseRes.terminalPercentiles["50"] ?? 0), "Most likely outcome"],
+    ["75th percentile", inr(baseRes.terminalPercentiles["75"] ?? 0), "Good outcome"],
+    ["90th percentile", inr(baseRes.terminalPercentiles["90"] ?? 0), "Strong outcome"],
+    ["95th percentile", inr(baseRes.terminalPercentiles["95"] ?? 0), "Excellent outcome"],
+    ["99th percentile (best 1%)", inr(baseRes.terminalPercentiles["99"] ?? 0), "Exceptional scenario"],
+  ];
+
+  // Sparkline of percentile curve
+  const sparkVals = [1, 5, 10, 25, 50, 75, 90, 95, 99].map(
+    (p) => baseRes.terminalPercentiles[String(p)] ?? 0
+  );
+  sparkline(doc, MARGIN, pageY, COL, 24, sparkVals, "#818cf8");
+  // goal line
+  const sparkMin = Math.min(...sparkVals);
+  const sparkMax = Math.max(...sparkVals);
+  const goalY_spark = pageY + 24 - ((baseRes.goalFuture - sparkMin) / (sparkMax - sparkMin || 1)) * 24;
+  setDrawColor(doc, "#34d399");
+  doc.setLineWidth(0.4);
+  doc.setLineDashPattern([2, 1], 0);
+  doc.line(MARGIN, goalY_spark, PAGE_W - MARGIN, goalY_spark);
+  doc.setLineDashPattern([], 0);
+  text(doc, "Goal", PAGE_W - MARGIN - 1, goalY_spark - 1, { size: 6, color: "#34d399", align: "right" });
+  pageY += 30;
+
+  percRows.forEach(([label, val, note]) => {
+    const isMedian = label.includes("median");
+    const isGoalBelow = (baseRes.terminalPercentiles[label.match(/\d+/)?.[0] ?? "50"] ?? 0) >= baseRes.goalFuture;
+    rect(doc, MARGIN, pageY, COL, 8, isMedian ? "#1e1b4b" : "#18181b", 2);
+    text(doc, label, MARGIN + 3, pageY + 5.5, { size: 7.5, color: isMedian ? "#a5b4fc" : "#a1a1aa", bold: isMedian });
+    text(doc, note, MARGIN + 85, pageY + 5.5, { size: 6.5, color: "#52525b" });
+    text(doc, val, PAGE_W - MARGIN - 3, pageY + 5.5, {
+      size: 8, color: isGoalBelow ? "#34d399" : "#f87171", bold: true, align: "right",
+    });
+    pageY += 10;
+  });
+
+  pageY += 6;
+  pageY = sectionHead(doc, pageY, "Drawdown Statistics");
+
+  const ddRows: [string, string][] = [
+    ["Median max drawdown", pct(Math.abs(baseRes.mddPercentiles["50"] ?? 0))],
+    ["25th percentile drawdown", pct(Math.abs(baseRes.mddPercentiles["25"] ?? 0))],
+    ["10th percentile drawdown", pct(Math.abs(baseRes.mddPercentiles["10"] ?? 0))],
+    ["5th percentile drawdown (worst 5%)", pct(Math.abs(baseRes.mddPercentiles["5"] ?? 0))],
+    ["1st percentile drawdown (worst 1%)", pct(Math.abs(baseRes.mddPercentiles["1"] ?? 0))],
+  ];
+
+  ddRows.forEach(([label, val]) => {
+    rect(doc, MARGIN, pageY, COL, 8, "#18181b", 2);
+    text(doc, label, MARGIN + 3, pageY + 5.5, { size: 7.5, color: "#a1a1aa" });
+    text(doc, val, PAGE_W - MARGIN - 3, pageY + 5.5, { size: 8, color: "#fbbf24", bold: true, align: "right" });
+    pageY += 10;
+  });
+
+  // ── Page 4: Scenarios + Recommendations ──────────────────────────────
+  newPage(doc, "Scenario Analysis & Recommendations");
+
+  if (stressRes.length > 0) {
+    pageY = sectionHead(doc, pageY, "Scenario Comparison");
+
+    // Table header
+    rect(doc, MARGIN, pageY, COL, 8, "#27272a", 2);
+    const cols = [0, 60, 90, 115, 140, 165];
+    ["Scenario", "P(success)", "Δ P", "VaR 5%", "CVaR 5%", "Δ VaR"].forEach((h, i) => {
+      text(doc, h, MARGIN + cols[i] + 2, pageY + 5.5, { size: 7, color: "#a1a1aa", bold: true });
+    });
+    pageY += 10;
+
+    // Base row
+    rect(doc, MARGIN, pageY, COL, 8, "#1e1b4b", 2);
+    [
+      "Base",
+      pct(baseRes.pSuccess),
+      "—",
+      inr(baseRes.var5),
+      inr(baseRes.cvar5),
+      "—",
+    ].forEach((v, i) => {
+      text(doc, v, MARGIN + cols[i] + 2, pageY + 5.5, {
+        size: 7.5, color: i === 0 ? "#a5b4fc" : "#e4e4e7", bold: i === 0,
+      });
+    });
+    pageY += 10;
+
+    stressRes.forEach((s) => {
+      const dp = s.res.pSuccess - baseRes.pSuccess;
+      const dv = s.res.var5 - baseRes.var5;
+      rect(doc, MARGIN, pageY, COL, 8, "#18181b", 2);
+      [
+        s.label.replace("Stress: ", ""),
+        pct(s.res.pSuccess),
+        (dp >= 0 ? "+" : "") + pct(dp),
+        inr(s.res.var5),
+        inr(s.res.cvar5),
+        (dv >= 0 ? "+" : "") + inr(dv),
+      ].forEach((v, i) => {
+        const isNeg = i === 2 ? dp < 0 : i === 5 ? dv < 0 : false;
+        const isPos = i === 2 ? dp >= 0 : i === 5 ? dv >= 0 : false;
+        const color = isNeg ? "#f87171" : isPos && i > 0 ? "#34d399" : "#e4e4e7";
+        text(doc, v, MARGIN + cols[i] + 2, pageY + 5.5, {
+          size: 7, color, bold: isNeg || isPos,
+        });
+      });
+      pageY += 10;
+    });
+
+    pageY += 6;
+  }
+
+  pageY = sectionHead(doc, pageY, "Model Configuration");
+
+  const modelRows: [string, string][] = [
+    ["Return model", cfg.model === "t" ? `Student-t (df=${cfg.df})` : "Normal"],
+    ["Rebalancing", cfg.rebalanceFreq],
+    ["TER (annual)", pct(cfg.terAnnual)],
+    ["Simulations", cfg.nSims.toLocaleString()],
+    ["Inflation", pct(cfg.inflationAnnual)],
+  ];
+
+  modelRows.forEach(([label, val], i) => {
+    const x = i % 2 === 0 ? MARGIN : MARGIN + COL / 2 + 4;
+    if (i % 2 === 0 && i > 0) pageY += 10;
+    rect(doc, x, pageY, COL / 2 - 4, 8, "#18181b", 2);
+    text(doc, label, x + 3, pageY + 5.5, { size: 7, color: "#a1a1aa" });
+    text(doc, val, x + COL / 2 - 7, pageY + 5.5, { size: 7.5, color: "#e4e4e7", bold: true, align: "right" });
+  });
+  pageY += 18;
+
+  pageY = sectionHead(doc, pageY, "Disclaimer");
+  text(
+    doc,
+    "This report is generated for educational and analytical purposes only. All results are probabilistic " +
+    "estimates derived from Monte Carlo simulation and do not constitute financial advice. Past performance " +
+    "and simulated outcomes are not guarantees of future results. Consult a qualified financial professional " +
+    "before making investment decisions. Asset returns are assumed stationary with no regime switching, " +
+    "taxes, transaction costs, or liquidity constraints modeled.",
+    MARGIN,
+    pageY,
+    { size: 7.5, color: "#71717a", maxWidth: COL }
+  );
+
+  // ── Finalize ─────────────────────────────────────────────────────────
+  const totalPages = doc.getNumberOfPages();
+  drawFooter(doc, totalPages);
+
+  doc.save("MonteCarlo_Report.pdf");
 }

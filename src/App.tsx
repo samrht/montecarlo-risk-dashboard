@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import type { Config, Results, StressTest } from "./engine/types";
 import { runSimulationInWorker } from "./engine/simClient";
 import Sidebar, { type NavKey } from "./components/layout/Sidebar";
+import OnboardingGuide, { useOnboardingGuide } from "./components/OnboardingGuide";
 import Topbar from "./components/layout/Topbar";
 import BuilderView from "./components/views/BuilderView";
 import DashboardView from "./components/views/DashboardView";
@@ -55,6 +56,7 @@ export default function App() {
   const [stressRes, setStressRes] = useState<StressRow[]>([]);
 
   const [cancelRun, setCancelRun] = useState<null | (() => void)>(null);
+  const { open: guideOpen, openGuide, closeGuide } = useOnboardingGuide();
 
   // ✅ actually use it (no weird "useMemo but ignore result" junk)
   const assetNames = useMemo(() => cfg.assets.map((a) => a.name), [cfg.assets]);
@@ -149,9 +151,10 @@ export default function App() {
         <div className="absolute left-[30%] -bottom-[10%] h-[520px] w-[520px] rounded-full bg-violet-500/20 blur-3xl blob blob-3" />
       </div>
 
+      <OnboardingGuide open={guideOpen} onClose={closeGuide} />
       <div className="grid h-screen grid-cols-12">
         <aside className="col-span-12 border-b border-white/10 md:col-span-3 md:border-b-0 md:border-r xl:col-span-2">
-          <Sidebar active={nav} onNav={setNav} hasResults={baseRes !== null} />
+          <Sidebar active={nav} onNav={setNav} hasResults={baseRes !== null} onOpenGuide={openGuide} />
         </aside>
 
         <div className="col-span-12 flex h-full flex-col md:col-span-9 xl:col-span-10">
